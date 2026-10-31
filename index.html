@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TexTrust</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,Arial,sans-serif;background:#f1effa;color:#1f1b3a}
+header{background:#2d2570;color:#fff;padding:22px 16px;text-align:center}
+header h1{margin:0;font-size:28px}
+header p{margin:6px 0 0;font-size:14px;opacity:.85}
+main{max-width:520px;margin:0 auto;padding:16px}
+.card{background:#fff;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.btn{display:block;width:100%;padding:14px;border:0;border-radius:10px;font-size:16px;font-weight:600;margin-top:10px;cursor:pointer;text-align:center}
+.pri{background:#2d2570;color:#fff}
+.sec{background:#e4e0f7;color:#2d2570}
+.small{font-size:13px;color:#6b6790}
+.name{font-size:28px;font-weight:700;margin:2px 0 10px}
+.ok{background:#e3f6e8;color:#14662b;padding:10px 12px;border-radius:10px;font-weight:600}
+.bad{background:#fde6e6;color:#a11d1d;padding:10px 12px;border-radius:10px;font-weight:600}
+.none{background:#eee;color:#444;padding:14px;border-radius:10px;text-align:center;font-weight:600}
+.score{font-size:30px;font-weight:700;margin:12px 0 4px}
+.imgs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.imgs canvas{width:100%;border-radius:8px;display:block}
+.hist div{padding:6px 0;border-bottom:1px solid #eee;font-size:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>TexTrust</h1>
+  <p>Counterfeit medicine detection using packaging micro-texture</p>
+</header>
+<main>
+  <div class="card">
+    <div id="status" class="small">Loading medicine database...</div>
+    <div id="meds" class="small" style="margin-top:6px"></div>
+    <button class="btn pri" id="camBtn">Take photo of pack</button>
+    <button class="btn sec" id="upBtn">Upload photo</button>
+    <input type="file" id="camIn" accept="image/*" capture="environment" hidden>
+    <input type="file" id="upIn" accept="image/*" hidden>
+  </div>
+  <div id="result"></div>
+  <div class="card" id="histCard" hidden>
+    <b>Scan history</b>
+    <div class="hist" id="hist"></div>
+  </div>
+</main>
+<script>
+// ====== HOST SETTINGS: only you (repo owner) can change these ======
+const MEDICINES = [
+  { name: "Dolo 650",    files: ["refs/Dolo_650/dolo650.jpg.webp"] },
+  { name: "Paracetamol", files: ["refs/Paracetamol/paracetamol.jpg.webp"] },
+  { name: "Bicosules",   files: ["refs/Bicosules/bicosules.jpg.webp"] }
+];
+const RECOGNISE_MIN = 0.65;  // lower it if real medicines show "not recognised"
+const GENUINE_MIN = 55;      // lower it if genuine packs show "fake"
+// ===================================================================
+
+const S=512,G=8,P=64;
+function toGray(rgba){const g=new Float32Array(S*S);for(let i=0;i<S*S;i++){g[i]=0.299*rgba[i*4]+0.587*rgba[i*4+1]+0.114*rgba[i*4+2];}return g;}
+function resize(src,sw,sh,dw,dh){const out=new Float32Array(dw*dh);const fx=sw/dw,fy=sh/dh;
+ for(let y=0;y<dh;y++){for(let x=0;x<dw;x++){
+  if(fx>1||fy>1){const x0=Math.floor(x*fx),x1=Math.max(x0+1,Math.floor((x+1)*fx)),y0=Math.floor(y*fy),y1=Math.max(y0+1,Math.floor((y+1)*fy));let s=0,c=0;
+   for(let yy=y0;yy<y1&&yy<sh;yy++)for(let xx=x0;xx<x1&&xx<sw;xx++){s+=src[yy*sw+xx];c++;}out[y*dw+x]=s/c;}
+  else{const sx=Math.min(sw-1.001,Math.max(0,(x+0.5)*fx-0.5)),sy=Math.min(sh-1.001,Math.max(0,(y+0.5)*fy-0.5));const ix=Math.floor(sx),iy=Math.floor(sy),ax=sx-ix,ay=sy-iy;
+   out[y*dw+x]=(src[iy*sw+ix]*(1-ax)+src[iy*sw+ix+1]*ax)*(1-ay)+(src[(iy+1)*sw+ix]*(1-ax)+src[(iy+1)*sw+ix+1]*ax)*ay;}}}
+ return out;}
+function crop(src,sw,x,y,w,h){const o=new Float32Array(w*h);for(let j=0;j<h;j++)for(let i=0;i<w;i++)o[j*w+i]=src[(y+j)*sw+x+i];return o;}
+function patchFeats(g,ox,oy){const W=S;let ls=0,ls2=0,gm=0,hf=0,n=0;const bins=new Float32Array(8);
+ for(let y=1;y<P-1;y++)for(let x=1;x<P-1;x++){const i=(oy+y)*W+ox+x,c=g[i];
+  const up=g[i-W],dn=g[i+W],lf=g[i-1],rt=g[i+1];
+  const lap=up+dn+lf+rt-4*c;ls+=lap;ls2+=lap*lap;
+  const gx=(rt-lf)/2,gy=(dn-up)/2;gm+=Math.hypot(gx,gy);
+  const box=(up+dn+lf+rt+c+g[i-W-1]+g[i-W+1]+g[i+W-1]+g[i+W+1])/9;hf+=Math.abs(c-box);
+  let code=0;const nb=[g[i-W-1],up,g[i-W+1],rt,g[i+W+1],dn,g[i+W-1],lf];
+  for(let k=0;k<8;k++)if(nb[k]>=c)code|=(1<<k);bins[code>>5]++;n++;}
+ const lv=ls2/n-(ls/n)*(ls/n);const f=[Math.log1p(lv),Math.log1p(gm/n),Math.log1p(hf/n)];
+ for(let k=0;k<8;k++)f.push(bins[k]/n);return f;}
+function extract(g){const f=[];for(let y=0;y<S;y+=P)for(let x=0;x<S;x+=P)f.push(patchFeats(g,x,y));return f;}
+function rng(seed){let s=seed>>>0;return()=>{s=(s*1664525+1013904223)>>>0;return s/4294967296;};}
+function gauss(r){return Math.sqrt(-2*Math.log(r()+1e-9))*Math.cos(2*Math.PI*r());}
+function variants(g){const out=[g];const r=rng(7);
+ for(let k=1;k<=5;k++){const d=k*3,v=new Float32Array(S*S);const a=1+0.03*k,b=2*k;
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){const sy=(y+d*(k%2?1:-1)+S)%S,sx=(x+d*(k%3?1:-1)+S)%S;v[y*S+x]=Math.min(255,Math.max(0,g[sy*S+sx]*a+b+gauss(r)*1.5));}
+  out.push(v);}
+ return out;}
+function buildStats(g){const all=[];for(const v of variants(g))for(const f of extract(v))all.push(f);
+ const d=all[0].length,mu=new Array(d).fill(0),sd=new Array(d).fill(0);
+ for(const f of all)for(let k=0;k<d;k++)mu[k]+=f[k]/all.length;
+ for(const f of all)for(let k=0;k<d;k++)sd[k]+=(f[k]-mu[k])**2/all.length;
+ for(let k=0;k<d;k++)sd[k]=Math.max(Math.sqrt(sd[k]),0.1*Math.abs(mu[k])+1e-3);return{mu,sd};}
+function textureScore(st,g){const f=extract(g);const z=f.map(p=>p.reduce((a,v,k)=>a+Math.abs((v-st.mu[k])/st.sd[k]),0)/p.length);
+ const mz=z.reduce((a,b)=>a+b,0)/z.length;return{score:100*Math.exp(-((mz/2.5)**2)),z};}
+function hist(rgba){const h=new Float32Array(64);let n=0;for(let y=0;y<S;y+=8)for(let x=0;x<S;x+=8){const i=(y*S+x)*4;h[(rgba[i]>>6)*16+(rgba[i+1]>>6)*4+(rgba[i+2]>>6)]++;n++;}for(let k=0;k<64;k++)h[k]/=n;return h;}
+function small(g){const s=resize(g,S,S,32,32);let m=0;for(const v of s)m+=v;m/=s.length;let sd=0;for(const v of s)sd+=(v-m)**2;sd=Math.sqrt(sd/s.length)+1e-6;return s.map(v=>(v-m)/sd);}
+function signature(rgba,g){const sm=[small(g)];for(const k of [1,2,3]){const m=Math.floor(S*0.04*k);const c=crop(g,S,m,m,S-2*m,S-2*m);sm.push(small(resize(c,S-2*m,S-2*m,S,S)));}return{h:hist(rgba),sm};}
+function similarity(ref,test){let hi=0;for(let k=0;k<64;k++)hi+=Math.min(ref.h[k],test.h[k]);
+ let best=-1;const t=test.sm[0];for(const r of ref.sm){let c=0;for(let i=0;i<t.length;i++)c+=r[i]*t[i];c/=t.length;if(c>best)best=c;}
+ return {hi,best,sim:0.2*hi+0.8*Math.max(0,best)};}
+
+const db = [];
+const history = [];
+const $ = id => document.getElementById(id);
+
+function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(src);i.src=src;});}
+function getRGBA(img){
+  const c=document.createElement('canvas');c.width=c.height=S;const x=c.getContext('2d',{willReadFrequently:true});
+  const m=Math.min(img.width,img.height),sx=(img.width-m)/2,sy=(img.height-m)/2;
+  x.drawImage(img,sx,sy,m,m,0,0,S,S);
+  return x.getImageData(0,0,S,S).data;
+}
+async function init(){
+  const missing=[];
+  for(const m of MEDICINES){
+    const sigs=[],stats=[];
+    for(const f of m.files){
+      try{
+        const img=await loadImg(f);const rgba=getRGBA(img);const g=toGray(rgba);
+        sigs.push(signature(rgba,g));stats.push(buildStats(g));
+      }catch(e){missing.push(f);}
+    }
+    if(sigs.length)db.push({name:m.name,sigs,stats});
+  }
+  if(!db.length){$('status').textContent="No medicine photos found. Add them in the refs folder on GitHub.";return;}
+  $('status').textContent="Ready. Medicines in database:";
+  $('meds').textContent=db.map(d=>d.name).join(", ")+(missing.length?"  |  Missing files: "+missing.join(", "):"");
+}
+function heatColor(t){t=Math.max(0,Math.min(1,t));return "hsla("+Math.round(120-120*t)+",90%,50%,0.5)";}
+function drawResult(rgba,z){
+  const a=document.createElement('canvas'),b=document.createElement('canvas');a.width=a.height=b.width=b.height=S;
+  const id=new ImageData(new Uint8ClampedArray(rgba),S,S);
+  a.getContext('2d').putImageData(id,0,0);
+  const bx=b.getContext('2d');bx.putImageData(id,0,0);
+  let k=0;for(let y=0;y<S;y+=P)for(let x=0;x<S;x+=P){bx.fillStyle=heatColor(z[k++]/4);bx.fillRect(x,y,P,P);}
+  return [a,b];
+}
+async function scan(file){
+  if(!file)return;
+  if(!db.length){$('result').innerHTML='<div class="card"><div class="none">Database not loaded yet</div></div>';return;}
+  const img=await loadImg(URL.createObjectURL(file));
+  const rgba=getRGBA(img),g=toGray(rgba),sg=signature(rgba,g);
+  let best=null,bs=-1;
+  for(const d of db)for(const r of d.sigs){const s=similarity(r,sg).sim;if(s>bs){bs=s;best=d;}}
+  const box=$('result');box.innerHTML='';
+  const card=document.createElement('div');card.className='card';
+  let verdict;
+  if(!best||bs<RECOGNISE_MIN){
+    card.innerHTML='<div class="none">Not a recognised medicine pack</div><p class="small">This does not match any medicine in the database.</p><p class="small">Match strength: '+bs.toFixed(2)+'</p>';
+    verdict="Not recognised";box.appendChild(card);
+  }else{
+    let sc=0,z=null;
+    for(const st of best.stats){const r=textureScore(st,g);if(r.score>=sc){sc=r.score;z=r.z;}}
+    const genuine=sc>=GENUINE_MIN;
+    card.innerHTML='<div class="small">Medicine identified</div><div class="name">'+best.name+'</div>'+
+      (genuine?'<div class="ok">Looks genuine</div>':'<div class="bad">Fake / altered pack suspected</div>')+
+      '<div class="score">'+Math.round(sc)+' / 100</div><div class="small">Authenticity score</div>'+
+      '<div class="imgs" id="imgs"></div><div class="small" style="margin-top:6px">Left: scanned. Right: heatmap (red = suspicious regions)</div>'+
+      '<p class="small">Match strength: '+bs.toFixed(2)+'</p>';
+    box.appendChild(card);
+    const [a,b]=drawResult(rgba,z);$('imgs').appendChild(a);$('imgs').appendChild(b);
+    if(!genuine){const r=document.createElement('button');r.className='btn sec';r.textContent='Report suspect pack';
+      r.onclick=()=>{r.textContent='Reported (demo)';};card.appendChild(r);}
+    verdict=best.name+": "+(genuine?"Genuine":"Fake / altered");
+  }
+  history.unshift(verdict);$('histCard').hidden=false;
+  $('hist').innerHTML=history.slice(0,10).map(v=>'<div>'+v+'</div>').join('');
+  box.scrollIntoView({behavior:'smooth'});
+}
+$('camBtn').onclick=()=>$('camIn').click();
+$('upBtn').onclick=()=>$('upIn').click();
+$('camIn').onchange=e=>{scan(e.target.files[0]);e.target.value='';};
+$('upIn').onchange=e=>{scan(e.target.files[0]);e.target.value='';};
+init();
+</script>
+</body>
+</html>
